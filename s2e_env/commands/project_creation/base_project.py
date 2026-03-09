@@ -99,7 +99,7 @@ class BaseProject(AbstractProject):
             img_desc = self._image_override
         else:
             img_desc = self._select_image(target, options.get('image'),
-                                        options.get('download_image', False), options.get("debootstrap"))
+                                          options.get('download_image', False))
 
             # Check architecture consistency (if the target has been specified)
             if target.path and not is_valid_arch(target.arch, img_desc['os']):
@@ -112,6 +112,9 @@ class BaseProject(AbstractProject):
                 logger.warning('No guestfs available. The VMI plugin may not run optimally')
 
             target.translated_path = self._translate_target_path_to_guestfs(target.path, guestfs_paths)
+
+        image_os_name = img_desc.get('os', {}).get('name', '')
+        use_kmod_cache = image_os_name in ('debootstrap', 'buildroot')
 
         # Generate the name of the project directory. The default project name
         # is the target program name without any file extension
@@ -181,7 +184,9 @@ class BaseProject(AbstractProject):
             'single_path': options.get('single_path', False),
             'custom_lua_string': options.get('custom_lua_string', ''),
 
-            'debootstrap': options.get('debootstrap', False)
+            # Image family used by bootstrap/buildroot templates for behavior selection.
+            'image_os_name': image_os_name,
+            'use_kmod_cache': use_kmod_cache,
         }
 
         # Do some basic analysis on the target (if it exists)
@@ -222,6 +227,15 @@ class BaseProject(AbstractProject):
         # Create symlinks to symbolic files
         if target.args.symbolic_files:
             self._symlink_project_files(project_dir, *target.args.symbolic_files)
+
+        # For debootstrap/buildroot images, expose the global kernel module cache
+        # in the project directory so bootstrap.sh can fetch modules via s2ecmd.
+        if config.get('use_kmod_cache'):
+            kmods_source = os.path.join(self.image_path(), '.kmods')
+            kmods_link = os.path.join(project_dir, '.kmods')
+            if not os.path.lexists(kmods_link):
+                logger.info('Creating a symlink to %s', kmods_source)
+                os.symlink(kmods_source, kmods_link)
 
         # Create a symlink to the guest tools directory
         self._symlink_guest_tools(project_dir, config['image'])
@@ -354,7 +368,7 @@ class BaseProject(AbstractProject):
         context = config.copy()
         context['target_bootstrap_template'] = self._bootstrap_template
         context['image_arch'] = config['image']['os']['arch']
-        context['debootstrap'] = config['debootstrap']
+        context['image_os_name'] = config['image_os_name']
 
         template = 'bootstrap.sh'
         output_path = os.path.join(project_dir, template)

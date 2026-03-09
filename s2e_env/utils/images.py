@@ -271,7 +271,7 @@ def select_best_image(base_templates, image_names):
     return image_names[0]
 
 
-def check_host_incompatibility(base_templates, image_name, debootstrap=False):
+def check_host_incompatibility(base_templates, image_name):
     """
     Warn users when the selected image may not work properly with binaries
     built on the host.
@@ -280,10 +280,7 @@ def check_host_incompatibility(base_templates, image_name, debootstrap=False):
     id_name, version, _ = distro.linux_distribution(full_distribution_name=False)
     id_name = id_name.lower()
 
-    if not debootstrap:
-        tpl = base_templates[image_name]
-    else:
-        tpl = base_templates['debootstrap']
+    tpl = base_templates[image_name]
 
     guest_name = tpl.get('os').get('name')
     guest_version = tpl.get('os').get('version')

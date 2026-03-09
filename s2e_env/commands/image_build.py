@@ -24,10 +24,12 @@ SOFTWARE.
 
 import glob
 import grp
+import json
 import logging
 import os
 import pwd
 import re
+import shlex
 import socket
 import time
 
@@ -51,6 +53,9 @@ from s2e_env.utils.images import ImageDownloader, get_image_templates, get_app_t
 
 
 logger = logging.getLogger('image_build')
+
+
+DYNAMIC_IMAGES_FILENAME = 'dynamic_images.json'
 
 
 def _get_user_groups(user_name):
@@ -329,6 +334,27 @@ def _download_images(image_path, image_names, templates):
     logger.info('Successfully downloaded images: %s', ', '.join(image_names))
 
 
+def _get_dynamic_image_templates(img_build_dir):
+    dynamic_images_path = os.path.join(img_build_dir, DYNAMIC_IMAGES_FILENAME)
+    if not os.path.exists(dynamic_images_path):
+        return {}
+
+    try:
+        with open(dynamic_images_path, 'r', encoding='utf-8') as fp:
+            doc = json.load(fp)
+    except Exception as e:
+        raise CommandError(f'Unable to parse dynamic image templates in {dynamic_images_path}: {e}') from e
+
+    if not isinstance(doc, dict):
+        raise CommandError(f'Invalid format in {dynamic_images_path}: root must be an object')
+
+    templates = doc.get('images', {})
+    if not isinstance(templates, dict):
+        raise CommandError(f'Invalid format in {dynamic_images_path}: images must be an object')
+
+    return templates
+
+
 class Command(EnvCommand):
     """
     Builds an image.
@@ -370,6 +396,15 @@ class Command(EnvCommand):
                             help='Path to folder that stores ISO files of Windows images')
         parser.add_argument('-n', '--no-kvm', action='store_true',
                             help='Disable KVM during image build')
+        parser.add_argument('-f', '--family', choices=['debootstrap-linux', 'buildroot-linux'],
+                            help='Explicit dynamic image family selector. Equivalent to passing the family name as positional argument')
+        parser.add_argument('-kt', '--kernel-tag',
+                            help='Kernel tag for dynamic image families (e.g. v5.10.220, v6.8-rc1)')
+        parser.add_argument('-bcd', '--builder-config-dir',
+                            help='Config directory for dynamic builder scripts that support it')
+        parser.add_argument('-bas', '--builder-args', default='',
+                            help='Extra arguments forwarded to dynamic builder script as one shell-style string '
+                                 '(example: --builder-args "--kernel-path /path --skip-kernel")')
 
     def handle(self, *args, **options):
         # If DISPLAY is missing, don't use headless mode
@@ -392,16 +427,36 @@ class Command(EnvCommand):
             self._invoke_make(img_build_dir, ['clean'])
             return
 
-        image_names = options['name']
+        image_names = list(options['name'])
+
+        family = options.get('family')
+        if family:
+            if image_names and family not in image_names:
+                raise CommandError('Please use either positional image name(s) or --family, or make them match')
+            if not image_names:
+                image_names = [family]
+
         templates = get_image_templates(img_build_dir)
+        dynamic_templates = _get_dynamic_image_templates(img_build_dir)
         app_templates = get_app_templates(img_build_dir)
         images, image_groups, image_descriptors = get_all_images(templates, app_templates)
 
         if not image_names:
             self._print_image_list(images, image_groups, image_descriptors)
+            self._print_dynamic_image_list(dynamic_templates)
             print('\nRun ``s2e image_build <name>`` to build an image. '
                   'Note that you must run ``s2e build`` **before** building '
                   'an image')
+            return
+
+        dynamic_names = [name for name in image_names if name in dynamic_templates]
+        if dynamic_names:
+            if len(dynamic_names) != 1 or len(image_names) != 1:
+                raise CommandError('Dynamic image build accepts exactly one family target at a time')
+
+            dynamic_name = dynamic_names[0]
+            self._build_dynamic_image(img_build_dir, dynamic_name, dynamic_templates[dynamic_name], options)
+            logger.success('Built dynamic image family target %s (%s)', dynamic_name, options.get('kernel_tag', ''))
             return
 
         image_names = translate_image_name(images, image_groups, image_names)
@@ -492,6 +547,77 @@ class Command(EnvCommand):
         except ErrorReturnCode as e:
             raise CommandError(e) from e
 
+    @staticmethod
+    def _resolve_dynamic_script_path(img_build_dir, script_path, env_path):
+        candidates = []
+
+        if os.path.isabs(script_path):
+            candidates.append(script_path)
+        else:
+            candidates.append(os.path.abspath(os.path.join(img_build_dir, script_path)))
+            candidates.append(os.path.abspath(os.path.join(env_path, script_path)))
+            candidates.append(os.path.abspath(os.path.join(os.path.dirname(env_path), script_path)))
+
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+
+        raise CommandError(f'Could not resolve dynamic builder script path: {script_path}')
+
+    @staticmethod
+    def _validate_kernel_tag(kernel_tag, pattern):
+        if not kernel_tag:
+            raise CommandError('Dynamic image families require --kernel-tag')
+
+        if pattern and not re.fullmatch(pattern, kernel_tag):
+            raise CommandError(f'Invalid kernel tag {kernel_tag}. Expected pattern: {pattern}')
+
+    def _build_dynamic_image(self, img_build_dir, dynamic_name, dynamic_desc, options):
+        if options['download']:
+            raise CommandError('--download is not supported for dynamic image families')
+        if options['archive']:
+            raise CommandError('--archive is not supported for dynamic image families')
+
+        kernel_tag = options.get('kernel_tag')
+        pattern = dynamic_desc.get('kernel_tag_regex', '')
+        self._validate_kernel_tag(kernel_tag, pattern)
+
+        script_rel = dynamic_desc.get('script')
+        kernel_tag_flag = dynamic_desc.get('kernel_tag_flag')
+
+        if not script_rel:
+            raise CommandError(f'Dynamic family {dynamic_name} has no script entry')
+        if not kernel_tag_flag:
+            raise CommandError(f'Dynamic family {dynamic_name} has no kernel_tag_flag entry')
+
+        script_path = self._resolve_dynamic_script_path(img_build_dir, script_rel, self.env_path())
+
+        cmd_args = [script_path, kernel_tag_flag, kernel_tag]
+
+        config_flag = dynamic_desc.get('config_dir_flag', '--config-dir')
+        if options.get('builder_config_dir'):
+            cmd_args.extend([config_flag, options['builder_config_dir']])
+
+        builder_args = options.get('builder_args', '')
+        if builder_args:
+            try:
+                cmd_args.extend(shlex.split(builder_args))
+            except ValueError as e:
+                raise CommandError(f'Invalid --builder-args value: {e}') from e
+
+        env = os.environ.copy()
+        env.setdefault('S2EDIR', self.env_path())
+        env.setdefault('S2E_IMAGE_DIR', self.image_path())
+
+        logger.info('Building dynamic image family %s with kernel tag %s', dynamic_name, kernel_tag)
+        logger.debug('Dynamic builder command: bash %s', ' '.join(cmd_args))
+
+        try:
+            bash = sh.Command('bash').bake(_env=env, _fg=True)
+            bash(*cmd_args)
+        except ErrorReturnCode as e:
+            raise CommandError(e) from e
+
     def _clone_kernel(self):
         kernels_root = self.source_path(CONSTANTS['repos']['images']['linux'])
         if os.path.exists(kernels_root):
@@ -539,3 +665,15 @@ class Command(EnvCommand):
         for app_template, desc in sorted(app_templates.items()):
             for base_image in desc['base_images']:
                 print(f' * {base_image}/{app_template} - {desc["name"]}')
+
+    def _print_dynamic_image_list(self, dynamic_templates):
+        if not dynamic_templates:
+            return
+
+        print('\nDynamic image families:')
+        for image_name, desc in sorted(dynamic_templates.items()):
+            print(f' * {image_name} - {desc.get("name", "Dynamic image family")}')
+
+        print('\nDynamic usage examples:')
+        print(' * s2e image_build buildroot-linux --kernel-tag v5.10.220')
+        print(' * s2e image_build debootstrap-linux --kernel-tag v6.8-rc1')
