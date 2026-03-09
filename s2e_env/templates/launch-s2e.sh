@@ -52,6 +52,16 @@ QEMU_BIOS="-bios \"{{qemu_bios}}\""
 {% endif %}
 
 
+QEMU_EXTRA_ARR=()
+if [ "x$QEMU_EXTRA_FLAGS" != "x" ]; then
+    eval "QEMU_EXTRA_ARR=($QEMU_EXTRA_FLAGS)"
+fi
+
+QEMU_BIOS_ARR=()
+if [ "x$QEMU_BIOS" != "x" ]; then
+    eval "QEMU_BIOS_ARR=($QEMU_BIOS)"
+fi
+
 export S2E_CONFIG=s2e-config.lua
 export S2E_SHARED_DIR=$INSTALL_DIR/share/libs2e
 export S2E_MAX_PROCESSES=1
@@ -63,19 +73,23 @@ if [ $S2E_MAX_PROCESSES -gt 1 ]; then
     export GRAPHICS=-nographic
 fi
 
-QEMU_ARGS="-k en-us -monitor null -enable-kvm -serial file:serial.txt $GRAPHICS -m $QEMU_MEMORY $QEMU_EXTRA_FLAGS"
+QEMU_ARGS=(-k en-us -monitor null -enable-kvm -serial file:serial.txt $GRAPHICS -m "$QEMU_MEMORY")
+
+if [ ${#QEMU_EXTRA_ARR[@]} -gt 0 ]; then
+    QEMU_ARGS+=("${QEMU_EXTRA_ARR[@]}")
+fi
 
 if [ "x$QEMU_DRIVE" != "x" ]; then
-    QEMU_ARGS="$QEMU_ARGS $QEMU_DRIVE"
+    QEMU_ARGS+=($QEMU_DRIVE)
 fi
 
 if [ "x$QEMU_SNAPSHOT" != "x" ]; then
-    QEMU_ARGS="$QEMU_ARGS -loadvm $QEMU_SNAPSHOT"
+    QEMU_ARGS+=(-loadvm "$QEMU_SNAPSHOT")
 fi
 
-if [ "x$QEMU_BIOS" != "x" ]; then
-    QEMU_ARGS="$QEMU_ARGS $QEMU_BIOS"
-    QEMU_ARGS="$QEMU_ARGS -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios"
+if [ ${#QEMU_BIOS_ARR[@]} -gt 0 ]; then
+    QEMU_ARGS+=("${QEMU_BIOS_ARR[@]}")
+    QEMU_ARGS+=(-chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios)
 fi
 
 if [ "x$DEBUG" != "x" ]; then
@@ -118,13 +132,13 @@ EOF
     # - Display debug output from the BIOS:
     #    -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios
 
-    $GDB $QEMU $QEMU_ARGS $*
+    $GDB $QEMU "${QEMU_ARGS[@]}" "$@"
 
 else
     QEMU="$INSTALL_DIR/bin/qemu-system-{{ qemu_arch }}"
     LIBS2E="$INSTALL_DIR/share/libs2e/libs2e-{{ qemu_arch }}-$S2E_MODE.so"
 
-    LD_PRELOAD=$LIBS2E $QEMU $QEMU_ARGS $* &
+    LD_PRELOAD=$LIBS2E $QEMU "${QEMU_ARGS[@]}" "$@" &
 
     CHILD_PID=$!
     trap "kill $CHILD_PID" SIGINT
