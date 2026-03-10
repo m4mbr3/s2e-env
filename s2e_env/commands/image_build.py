@@ -403,8 +403,13 @@ class Command(EnvCommand):
         parser.add_argument('-bcd', '--builder-config-dir',
                             help='Config directory for dynamic builder scripts that support it')
         parser.add_argument('-bas', '--builder-args', default='',
-                            help='Extra arguments forwarded to dynamic builder script as one shell-style string '
-                                 '(example: --builder-args "--kernel-path /path --skip-kernel")')
+                help='Extra arguments forwarded to dynamic builder script as one shell-style string '
+                 '(example: --builder-args "--kernel-path /path --skip <phase") '
+                 'Possible builder args: '
+                 '  --kernel-path: Path to kernel'
+                 '  --config-dir: Configuration directory'
+                 '  --skip [phase_name, phase_number]: Comma-separated list'
+                 '(e.g., --skip build,kprobe or --skip 1,2)')
 
     def handle(self, *args, **options):
         # If DISPLAY is missing, don't use headless mode
