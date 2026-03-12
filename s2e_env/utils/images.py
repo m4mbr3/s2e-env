@@ -281,6 +281,7 @@ def check_host_incompatibility(base_templates, image_name):
     id_name = id_name.lower()
 
     tpl = base_templates[image_name]
+
     guest_name = tpl.get('os').get('name')
     guest_version = tpl.get('os').get('version')
     if guest_name == id_name and guest_version.startswith(version):

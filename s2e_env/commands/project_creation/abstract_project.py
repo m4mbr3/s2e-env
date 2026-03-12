@@ -234,15 +234,31 @@ class AbstractProject(EnvCommand):
             # Don't do any validation on app images yet.
             return self._get_or_download_image(img_templates, image, download_image)
 
+        # Support locally built images that are not listed in images.json
+        # (e.g., dynamic debootstrap/buildroot families), as long as they
+        # already have an image descriptor in the images directory.
         if image not in img_templates:
-            raise CommandError(f'Unknown guest image {image}. Run s2e image_build for a list of supported images.')
+            local_image_path = self.image_path(image)
+            try:
+                local_desc = get_image_descriptor(local_image_path)
+            except CommandError as e:
+                raise CommandError(
+                    f'Unknown guest image {image}. Run s2e image_build for a list of supported images.'
+                ) from e
+
+            if not self._is_valid_image(target, local_desc['os']):
+                raise CommandError(f'Chosen image {image} is not compatible with the target.')
+
+            # Reuse host compatibility warning logic for dynamic/local images.
+            check_host_incompatibility({image: local_desc}, image)
+            return local_desc
 
         supported_images = self.get_usable_images(target, img_templates)
         if not supported_images:
             raise CommandError('No suitable image available for this target.')
 
         if image not in supported_images:
-            raise CommandError(f'Chosen image {image} is not compatbile with the target.')
+            raise CommandError(f'Chosen image {image} is not compatible with the target.')
 
         check_host_incompatibility(img_templates, base_image_name)
         return self._get_or_download_image(img_templates, image, download_image)

@@ -30,7 +30,27 @@ function execute_target {
 # Nothing more to initialize on Linux
 function target_init {
     # Start the LinuxMonitor kernel module
+    {% if image_os_name in ('debootstrap', 'buildroot') %}
+    local KREL
+    local KMOD_HOST_REL
+    local KMOD_GUEST_PATH
+
+    KREL="$(uname -r)"
+    KMOD_HOST_REL=".kmods/s2e-kprobe/${KREL}/current/s2e-kprobe.ko"
+    KMOD_GUEST_PATH="/tmp/s2e-kprobe.ko"
+
+    ${S2ECMD} get "${KMOD_HOST_REL}" "${KMOD_GUEST_PATH}" > /dev/null 2>&1
+    if [ -f "${KMOD_GUEST_PATH}" ]; then
+        sudo insmod "${KMOD_GUEST_PATH}" > /dev/ttyS0
+    elif [ -f "/root/s2e-kprobe/s2e-${KREL}/s2e-kprobe.ko" ]; then
+        sudo insmod "/root/s2e-kprobe/s2e-${KREL}/s2e-kprobe.ko" > /dev/ttyS0
+    else
+        ${S2ECMD} kill 1 "Could not fetch ${KMOD_HOST_REL} and no legacy /root/s2e-kprobe module was found"
+        exit 1
+    fi
+    {% else %}
     sudo modprobe s2e
+    {% endif %}
 }
 
 # Returns Linux-specific tools
