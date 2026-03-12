@@ -56,6 +56,7 @@ logger = logging.getLogger('image_build')
 
 
 DYNAMIC_IMAGES_FILENAME = 'dynamic_images.json'
+DYNAMIC_ONLY_OPTION_KEYS = ('kernel_tag', 'builder_config_dir', 'builder_args', 'family_help')
 
 
 def _get_user_groups(user_name):
@@ -396,20 +397,35 @@ class Command(EnvCommand):
                             help='Path to folder that stores ISO files of Windows images')
         parser.add_argument('-n', '--no-kvm', action='store_true',
                             help='Disable KVM during image build')
-        parser.add_argument('-f', '--family', choices=['debootstrap-linux', 'buildroot-linux'],
-                            help='Explicit dynamic image family selector. Equivalent to passing the family name as positional argument')
-        parser.add_argument('-kt', '--kernel-tag',
-                            help='Kernel tag for dynamic image families (e.g. v5.10.220, v6.8-rc1)')
-        parser.add_argument('-bcd', '--builder-config-dir',
-                            help='Config directory for dynamic builder scripts that support it')
-        parser.add_argument('-bas', '--builder-args', default='',
-                help='Extra arguments forwarded to dynamic builder script as one shell-style string '
-                 '(example: --builder-args "--kernel-path /path --skip <phase") '
-                 'Possible builder args: '
-                 '  --kernel-path: Path to kernel'
-                 '  --config-dir: Configuration directory'
-                 '  --skip [phase_name, phase_number]: Comma-separated list'
-                 '(e.g., --skip build,kprobe or --skip 1,2)')
+
+        dynamic_group = parser.add_argument_group(
+            'dynamic family options (only for dynamic family targets)'
+        )
+        dynamic_group.add_argument(
+            '-f', '--family',
+            choices=['debootstrap-linux', 'buildroot-linux'],
+            help='Pipeline selector'
+        )
+        dynamic_group.add_argument(
+            '-kt', '--kernel-tag',
+            help='Kernel tag for dynamic families (e.g. v5.10.220, v6.8-rc1). Required for actual dynamic builds.'
+        )
+        dynamic_group.add_argument(
+            '-bcd', '--builder-config-dir',
+            help='Config directory forwarded to dynamic builder scripts that support a config-dir option.'
+        )
+        dynamic_group.add_argument(
+            '-bas', '--builder-args',
+            default='',
+            help='Extra arguments forwarded to dynamic builder script as one shell-style string. '
+                 'Example: --builder-args "--kernel-path /path --skip build,kprobe"'
+        )
+        dynamic_group.add_argument(
+            '--family-help',
+            action='store_true',
+            help='Show the selected dynamic family script help and exit. '
+                 'Use it as an additional argument with --family <name> as --family-help or without the --family option as --family-help <family-name>'
+        )
 
     def handle(self, *args, **options):
         # If DISPLAY is missing, don't use headless mode
@@ -455,14 +471,24 @@ class Command(EnvCommand):
             return
 
         dynamic_names = [name for name in image_names if name in dynamic_templates]
+        self._validate_dynamic_option_usage(options, image_names, dynamic_names)
+
         if dynamic_names:
             if len(dynamic_names) != 1 or len(image_names) != 1:
                 raise CommandError('Dynamic image build accepts exactly one family target at a time')
 
             dynamic_name = dynamic_names[0]
+
+            if options.get('family_help'):
+                self._show_dynamic_script_help(img_build_dir, dynamic_name, dynamic_templates[dynamic_name])
+                return
+
             self._build_dynamic_image(img_build_dir, dynamic_name, dynamic_templates[dynamic_name], options)
             logger.success('Built dynamic image family target %s (%s)', dynamic_name, options.get('kernel_tag', ''))
             return
+
+        if options.get('family_help'):
+            raise CommandError('--family-help is only valid with a dynamic family target')
 
         image_names = translate_image_name(images, image_groups, image_names)
         logger.info('The following images will be built:')
@@ -568,6 +594,47 @@ class Command(EnvCommand):
                 return path
 
         raise CommandError(f'Could not resolve dynamic builder script path: {script_path}')
+
+    @staticmethod
+    def _validate_dynamic_option_usage(options, image_names, dynamic_names):
+        if dynamic_names:
+            return
+
+        used_dynamic_options = []
+        for key in DYNAMIC_ONLY_OPTION_KEYS:
+            value = options.get(key)
+            if value in (None, '', False):
+                continue
+            used_dynamic_options.append(f'--{key.replace("_", "-")}')
+
+        if used_dynamic_options:
+            raise CommandError(
+                'The following options are only valid for dynamic family targets: '
+                f'{", ".join(sorted(used_dynamic_options))}. '
+                'Use --family <name> or pass a dynamic family name as positional argument.'
+            )
+
+    def _show_dynamic_script_help(self, img_build_dir, dynamic_name, dynamic_desc):
+        script_rel = dynamic_desc.get('script')
+        if not script_rel:
+            raise CommandError(f'Dynamic family {dynamic_name} has no script entry')
+
+        script_path = self._resolve_dynamic_script_path(img_build_dir, script_rel, self.env_path())
+
+        env = os.environ.copy()
+        env.setdefault('S2EDIR', self.env_path())
+        env.setdefault('S2E_IMAGE_DIR', self.image_path())
+
+        logger.info('Showing dynamic builder help for %s', dynamic_name)
+
+        bash = sh.Command('bash').bake(_env=env, _fg=True)
+        try:
+            bash(script_path, '--help')
+        except ErrorReturnCode:
+            try:
+                bash(script_path, '-h')
+            except ErrorReturnCode as e:
+                raise CommandError(e) from e
 
     @staticmethod
     def _validate_kernel_tag(kernel_tag, pattern):
@@ -682,3 +749,4 @@ class Command(EnvCommand):
         print('\nDynamic usage examples:')
         print(' * s2e image_build buildroot-linux --kernel-tag v5.10.220')
         print(' * s2e image_build debootstrap-linux --kernel-tag v6.8-rc1')
+        print(' * s2e image_build --family buildroot-linux --family-help')
