@@ -56,8 +56,6 @@ logger = logging.getLogger('image_build')
 
 
 DYNAMIC_IMAGES_FILENAME = 'dynamic_images.json'
-DYNAMIC_ONLY_OPTION_KEYS = ('kernel_tag', 'builder_config_dir', 'builder_args', 'family_help')
-
 
 def _get_user_groups(user_name):
     """
@@ -370,41 +368,66 @@ class Command(EnvCommand):
         self._use_kvm = True
         self._num_cores = 1
         self._has_cow = False
+        self.regular_parser = None
+        self.buildroot_linux = None
+        self.debootstrap_linux = None
+
+    def run_from_argv(self, argv):
+        if len(argv) > 2:
+            if argv[2] in ['regular',  'buildroot', 'debootstrap', '-h']:
+                super().run_from_argv(argv)
+                return
+
+        new_argv = argv[:2] + ['regular'] + argv[2:]
+        super().run_from_argv(argv=new_argv)
 
     def add_arguments(self, parser):
         super().add_arguments(parser)
+        subparser = parser.add_subparsers(dest="command", required=False)
 
-        parser.add_argument('name',
-                            help='The name of the image to build. If empty,'
-                                 ' shows available images', nargs='*')
-        parser.add_argument('-g', '--gui', action='store_true',
-                            help='Display QEMU GUI during image build')
-        parser.add_argument('-c', '--cores', required=False, default=2,
-                            type=int,
-                            help='The number of cores used when building the '
-                                 'VM image. Defaults to 2')
-        parser.add_argument('-x', '--clean', action='store_true',
-                            help='Deletes all images and rebuild them from '
-                                 'scratch')
-        parser.add_argument('-a', '--archive', action='store_true',
-                            help='Creates an archive for the specified image')
-        parser.add_argument('-p', '--ftp-port', required=False, default=15468, type=int,
-                            help='Port for the internal FTP server to receive files from guest VMs during build')
-        parser.add_argument('-d', '--download', action='store_true',
-                            help='Download image from the repository instead '
-                                 'of building it')
-        parser.add_argument('-i', '--iso-dir',
-                            help='Path to folder that stores ISO files of Windows images')
-        parser.add_argument('-n', '--no-kvm', action='store_true',
-                            help='Disable KVM during image build')
+        self.regular_parser = subparser.add_parser('regular', cmd=self)
 
+        regular_group = self.regular_parser.add_argument_group('default')
+        regular_group.add_argument('name',
+                                   help='The name of the image to build. If empty,'
+                                   ' shows available images', nargs='*')
+        regular_group.add_argument('-g', '--gui', action='store_true',
+                                   help='Display QEMU GUI during image build')
+        regular_group.add_argument('-c', '--cores', required=False, default=2,
+                                   type=int,
+                                   help='The number of cores used when building the '
+                                   'VM image. Defaults to 2')
+        regular_group.add_argument('-x', '--clean', action='store_true',
+                                   help='Deletes all images and rebuild them from '
+                                   'scratch')
+        regular_group.add_argument('-a', '--archive', action='store_true',
+                                   help='Creates an archive for the specified image')
+        regular_group.add_argument('-p', '--ftp-port', required=False, default=15468, type=int,
+                                   help='Port for the internal FTP server to receive files from guest VMs during build')
+        regular_group.add_argument('-d', '--download', action='store_true',
+                                   help='Download image from the repository instead '
+                                   'of building it')
+        regular_group.add_argument('-i', '--iso-dir',
+                                   help='Path to folder that stores ISO files of Windows images')
+        regular_group.add_argument('-n', '--no-kvm', action='store_true',
+                                   help='Disable KVM during image build')
+
+
+
+        self.buildroot_linux = subparser.add_parser('buildroot',
+                                                    description='Subcommand to generate a Linux buildroot-based S2E Image with custom kernel version',
+                                                    cmd=self)
+        self.debootstrap_linux = subparser.add_parser('debootstrap',
+                                                    description='Subcommand to generate a Linux debootstrap-based S2E Image with custom kernel version',
+                                                    cmd=self)
+
+        self.add_group(self.buildroot_linux)
+        self.add_group(self.debootstrap_linux)
+
+
+    def add_group(self, parser):
         dynamic_group = parser.add_argument_group(
-            'dynamic family options (only for dynamic family targets)'
-        )
-        dynamic_group.add_argument(
-            '-f', '--family',
-            choices=['debootstrap-linux', 'buildroot-linux'],
-            help='Pipeline selector'
+            'dynamic family options'
         )
         dynamic_group.add_argument(
             '-kt', '--kernel-tag',
@@ -420,14 +443,16 @@ class Command(EnvCommand):
             help='Extra arguments forwarded to dynamic builder script as one shell-style string. '
                  'Example: --builder-args "--kernel-path /path --skip build,kprobe"'
         )
-        dynamic_group.add_argument(
-            '--family-help',
-            action='store_true',
-            help='Show the selected dynamic family script help and exit. '
-                 'Use it as an additional argument with --family <name> as --family-help or without the --family option as --family-help <family-name>'
-        )
 
     def handle(self, *args, **options):
+        command = options.get('command', 'regular')
+
+        if command in ['buildroot', 'debootstrap']:
+            self.handle_dynamic(*args, **options)
+        else:
+            self.handle_regular(*args, **options)
+
+    def handle_regular(self, *args, **options):
         # If DISPLAY is missing, don't use headless mode
         if options['gui']:
             self._headless = False
@@ -448,47 +473,18 @@ class Command(EnvCommand):
             self._invoke_make(img_build_dir, ['clean'])
             return
 
-        image_names = list(options['name'])
-
-        family = options.get('family')
-        if family:
-            if image_names and family not in image_names:
-                raise CommandError('Please use either positional image name(s) or --family, or make them match')
-            if not image_names:
-                image_names = [family]
-
+        image_names = options['name']
         templates = get_image_templates(img_build_dir)
-        dynamic_templates = _get_dynamic_image_templates(img_build_dir)
         app_templates = get_app_templates(img_build_dir)
         images, image_groups, image_descriptors = get_all_images(templates, app_templates)
 
         if not image_names:
+            self.regular_parser.print_help()
             self._print_image_list(images, image_groups, image_descriptors)
-            self._print_dynamic_image_list(dynamic_templates)
             print('\nRun ``s2e image_build <name>`` to build an image. '
                   'Note that you must run ``s2e build`` **before** building '
                   'an image')
             return
-
-        dynamic_names = [name for name in image_names if name in dynamic_templates]
-        self._validate_dynamic_option_usage(options, image_names, dynamic_names)
-
-        if dynamic_names:
-            if len(dynamic_names) != 1 or len(image_names) != 1:
-                raise CommandError('Dynamic image build accepts exactly one family target at a time')
-
-            dynamic_name = dynamic_names[0]
-
-            if options.get('family_help'):
-                self._show_dynamic_script_help(img_build_dir, dynamic_name, dynamic_templates[dynamic_name])
-                return
-
-            self._build_dynamic_image(img_build_dir, dynamic_name, dynamic_templates[dynamic_name], options)
-            logger.success('Built dynamic image family target %s (%s)', dynamic_name, options.get('kernel_tag', ''))
-            return
-
-        if options.get('family_help'):
-            raise CommandError('--family-help is only valid with a dynamic family target')
 
         image_names = translate_image_name(images, image_groups, image_names)
         logger.info('The following images will be built:')
@@ -539,6 +535,34 @@ class Command(EnvCommand):
         logger.success('Built image(s) \'%s\'', ' '.join(image_names))
 
         server.close_all()
+
+    def handle_dynamic(self, *args, **options):
+        # The path could have been deleted by previous clean
+        if not os.path.exists(path=self.image_path()):
+            os.makedirs(name=self.image_path())
+
+        img_build_dir = self.source_path(CONSTANTS['repos']['images']['build'])
+
+        dynamic_name = options.get('command') + '-linux'
+
+        dynamic_templates = _get_dynamic_image_templates(img_build_dir)
+
+        if options.get('kernel_tag') is None:
+            if dynamic_name in ['buildroot']:
+                self.buildroot_linux.print_help()
+            else:
+                self.debootstrap_linux.print_help()
+
+            self._print_dynamic_usage_example(options.get('command'))
+
+            return
+
+        print("dynamic_name {}".format(dynamic_name))
+        print("dynamic templates {}".format(dynamic_templates))
+
+        self._build_dynamic_image(img_build_dir, dynamic_name, dynamic_templates[dynamic_name], options)
+        logger.success('Built dynamic image family target %s (%s)', dynamic_name, options.get('kernel_tag', ''))
+        return
 
     def _invoke_make(self, img_build_dir, rule_names, ftp_port=0, iso_dir=''):
         env = os.environ.copy()
@@ -595,25 +619,6 @@ class Command(EnvCommand):
 
         raise CommandError(f'Could not resolve dynamic builder script path: {script_path}')
 
-    @staticmethod
-    def _validate_dynamic_option_usage(options, image_names, dynamic_names):
-        if dynamic_names:
-            return
-
-        used_dynamic_options = []
-        for key in DYNAMIC_ONLY_OPTION_KEYS:
-            value = options.get(key)
-            if value in (None, '', False):
-                continue
-            used_dynamic_options.append(f'--{key.replace("_", "-")}')
-
-        if used_dynamic_options:
-            raise CommandError(
-                'The following options are only valid for dynamic family targets: '
-                f'{", ".join(sorted(used_dynamic_options))}. '
-                'Use --family <name> or pass a dynamic family name as positional argument.'
-            )
-
     def _show_dynamic_script_help(self, img_build_dir, dynamic_name, dynamic_desc):
         script_rel = dynamic_desc.get('script')
         if not script_rel:
@@ -645,11 +650,6 @@ class Command(EnvCommand):
             raise CommandError(f'Invalid kernel tag {kernel_tag}. Expected pattern: {pattern}')
 
     def _build_dynamic_image(self, img_build_dir, dynamic_name, dynamic_desc, options):
-        if options['download']:
-            raise CommandError('--download is not supported for dynamic image families')
-        if options['archive']:
-            raise CommandError('--archive is not supported for dynamic image families')
-
         kernel_tag = options.get('kernel_tag')
         pattern = dynamic_desc.get('kernel_tag_regex', '')
         self._validate_kernel_tag(kernel_tag, pattern)
@@ -715,7 +715,7 @@ class Command(EnvCommand):
                 ret = max(ret, len(item))
             return ret
 
-        print('Available image groups:')
+        print('\n\nAvailable image groups:')
         max_group_len = get_max_len(image_groups)
         for group in image_groups:
             print(f' * {group:{max_group_len}} - Build {group} images')
@@ -738,15 +738,13 @@ class Command(EnvCommand):
             for base_image in desc['base_images']:
                 print(f' * {base_image}/{app_template} - {desc["name"]}')
 
-    def _print_dynamic_image_list(self, dynamic_templates):
-        if not dynamic_templates:
-            return
-
-        print('\nDynamic image families:')
-        for image_name, desc in sorted(dynamic_templates.items()):
-            print(f' * {image_name} - {desc.get("name", "Dynamic image family")}')
-
+    def _print_dynamic_usage_example(self, command):
         print('\nDynamic usage examples:')
-        print(' * s2e image_build buildroot-linux --kernel-tag v5.10.220')
-        print(' * s2e image_build debootstrap-linux --kernel-tag v6.8-rc1')
-        print(' * s2e image_build --family buildroot-linux --family-help')
+        if command in ['buildroot']:
+            print(' * s2e image_build buildroot --kernel-tag v5.10.220\n')
+            print('Note that you must run ``s2e build`` **before** building '
+                  'an image')
+        else:
+            print(' * s2e image_build debootstrap --kernel-tag v6.8-rc1\n')
+            print('Note that you must run ``s2e build`` **before** building '
+                  'an image')
